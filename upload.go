@@ -11,7 +11,6 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"time"
 )
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -23,13 +22,15 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry := Entry{
-		Path:     path,
-		Bucket:   context.DefaultContext.Get(r, S3_BUCKET).(*s3.Bucket).Name,
-		Endpoint: context.DefaultContext.Get(r, S3_ENDPOINT).(aws.Region).Name,
-		Auth:     context.DefaultContext.Get(r, AWS_AUTH).(aws.Auth),
-		TOD:      time.Now().Add(24 * 7 * time.Hour),
-		UUID:     gouuid.New().String(),
+		UUID:           gouuid.New().String(),
+		Endpoint:       context.DefaultContext.Get(r, S3_ENDPOINT).(aws.Region).Name,
+		Bucket:         context.DefaultContext.Get(r, S3_BUCKET).(*s3.Bucket).Name,
+		Path:           path,
+		Auth:           context.DefaultContext.Get(r, AWS_AUTH).(aws.Auth),
+		TOD:            context.DefaultContext.Get(r, HEADER_TOD).(int64),
+		RemainingCount: context.DefaultContext.Get(r, HEADER_MAX_ACCESS).(int64),
 	}
+
 	err := db.C("entry").Insert(entry)
 	if err != nil {
 		log.Printf("db.Insert failed: %s", err)
@@ -46,6 +47,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, "%s/api/get/%s\n", options.BaseURL, entry.UUID)
+	fmt.Fprintf(w, "%s\n", entry.UUID)
 
 }

@@ -8,32 +8,32 @@ import (
 	"launchpad.net/goamz/aws"
 	"log"
 	"net/http"
-	"time"
 )
 
 const (
 	AWS_AUTH = iota
 	S3_ENDPOINT
 	S3_BUCKET
+	HEADER_TOD
+	HEADER_MAX_ACCESS
 )
 
 type Entry struct {
-	Bucket   string    `bson:"bucket"`
-	Path     string    `bson:"path"`
-	Endpoint string    `bson:"endpoint"`
-	Auth     aws.Auth  `bson:"auth"`
-	TOD      time.Time `bson:"tod"`
-	UUID     string    `bson:"uuid"`
+	UUID           string   `bson:"uuid"`
+	Endpoint       string   `bson:"endpoint"`
+	Bucket         string   `bson:"bucket"`
+	Path           string   `bson:"path"`
+	Auth           aws.Auth `bson:"auth"`
+	TOD            int64    `bson:"tod"`
+	RemainingCount int64    `bson:"remaining_count"`
 }
 
 var (
 	options = struct {
 		MongoDB string `goptions:"--mongodb, obligatory, description='MongoDB to connect to'"`
 		Listen  string `goptions:"--listen, -l, description='Address to bind HTTP server to (default: localhost:8080)'"`
-		BaseURL string `goptions:"--base-url, -b, description='URL prefix'"`
 	}{
-		Listen:  "localhost:8080",
-		BaseURL: "http://localhost:8080",
+		Listen: "localhost:8080",
 	}
 	db *mgo.Database
 )
@@ -57,12 +57,19 @@ func main() {
 
 	r := mux.NewRouter()
 	api := r.PathPrefix("/api").Subrouter()
-	api.HandleFunc("/upload/{path:.+}", awsAuthContext(s3BucketContext(uploadHandler)))
-	api.HandleFunc("/get/{uuid:[0-9a-f-]+}", getHandler)
+	api.Methods("POST").Path("/upload/{path:.+}").HandlerFunc(
+		cleanupWrapper(
+			maxAccessContext(
+				ttlContext(
+					awsAuthContext(
+						s3BucketContext(
+							uploadHandler))))))
+	api.HandleFunc("/get/{uuid:[0-9a-f-]+}", cleanupWrapper(getHandler))
 
 	static := r.PathPrefix("/").Subrouter()
 	static.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
+	log.Println("Starting server...")
 	err = http.ListenAndServe(options.Listen, r)
 	if err != nil {
 		log.Fatalf("Failed to start webserver: %s", err)

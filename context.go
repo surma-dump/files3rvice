@@ -3,10 +3,15 @@ package main
 import (
 	"code.google.com/p/gorilla/context"
 	"encoding/base64"
+	"labix.org/v2/mgo"
+	"labix.org/v2/mgo/bson"
 	"launchpad.net/goamz/aws"
 	"launchpad.net/goamz/s3"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 func awsAuthContext(f http.HandlerFunc) http.HandlerFunc {
@@ -73,20 +78,87 @@ func s3BucketContext(f http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func splitBucketURL(url string) (bucketname string, endpoint string, ok bool) {
-	ok = true
-	parts := strings.Split(url, ".")
-	if len(parts) <= 3 {
-		ok = false
-		return
+func ttlContext(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ttl_string, ok := r.Header["X-Ttl"]
+		if !ok || len(ttl_string) < 1 {
+			log.Printf("Using default TTL (%v, %#v)", ok, ttl_string)
+			ttl_string = []string{"-1"}
+		}
+
+		ttl, err := strconv.ParseInt(ttl_string[0], 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid TTL", http.StatusNotFound)
+			return
+		}
+		if ttl != -1 {
+			ttl = time.Now().Add(time.Duration(ttl) * time.Minute).UnixNano()
+		}
+
+		context.DefaultContext.Set(r, HEADER_TOD, ttl)
+		f(w, r)
 	}
-	bucketname = strings.Join(parts[0:len(parts)-3], ".")
-	endpointurl := parts[len(parts)-3]
-	endpointparts := strings.Split(endpointurl, "-")
-	if len(endpointparts) != 5 {
-		ok = false
-		return
+}
+
+func maxAccessContext(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ma_string, ok := r.Header["X-Max-Access"]
+		if !ok || len(ma_string) < 1 {
+			ma_string = []string{"-1"}
+		}
+
+		ttl, err := strconv.ParseInt(ma_string[0], 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid Max-Access", http.StatusNotFound)
+			return
+		}
+
+		context.DefaultContext.Set(r, HEADER_MAX_ACCESS, ttl)
+		f(w, r)
 	}
-	endpoint = strings.Join(endpointparts[2:], "-")
-	return
+}
+
+func cleanupWrapper(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		for err == nil {
+			var entry Entry
+			_, err = db.C("entry").Find(bson.M{
+				"$or": []bson.M{
+					bson.M{
+						"$and": []bson.M{
+							bson.M{
+								"tod": bson.M{
+									"$lt": time.Now().UnixNano(),
+								},
+							},
+							bson.M{
+								"tod": bson.M{
+									"$gte": 0,
+								},
+							},
+						},
+					},
+					bson.M{
+						"remaining_count": bson.M{
+							"$lte": 0,
+						},
+					},
+				},
+			}).Apply(mgo.Change{
+				Remove: true,
+			}, &entry)
+
+			if err != nil {
+				continue
+			}
+
+			bucket := s3.New(entry.Auth, aws.Regions[entry.Endpoint]).Bucket(entry.Bucket)
+			err := bucket.Del(entry.Path)
+			if err != nil {
+				log.Printf("cleanupWrapper: S3 delete failed: %s", err)
+			}
+		}
+		f(w, r)
+	}
 }
